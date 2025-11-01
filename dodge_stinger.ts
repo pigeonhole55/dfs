@@ -1,0 +1,1086 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Play, Pause, RotateCcw, Info, Zap, Wind } from 'lucide-react';
+
+const MissileDodgeVisualization = () => {
+  const canvasRef = useRef(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [showInfo, setShowInfo] = useState(false);
+  const animationRef = useRef(null);
+  
+  // Physical parameters (converted to internal m/s for calculations)
+  const D = 1000; // Initial distance in meters
+  const V_m = 300 * 3.6; // Missile speed: 300 km/h = 1080 m/s (internal)
+  const V_m_display = 300; // For display in km/h
+  const V_t = 70 * 3.6; // Helicopter speed: 70 km/h = 252 m/s (internal)
+  const V_t_display = 70; // For display in km/h
+  const a_max = 84; // Maximum acceleration in m/s²
+  const scale = 0.35;
+  const dt = 0.008;
+  const timeScale = 0.5;
+  
+  // Advanced physics parameters
+  const N = 3.5; // Proportional Navigation constant (higher = more aggressive)
+  const missileMass = 10.1; // kg (FIM-92 Stinger)
+  const dragCoefficient = 0.3;
+  const airDensity = 1.225; // kg/m³ at sea level
+  const referenceArea = 0.01; // m²
+  
+  const [state, setState] = useState({
+    time: 0,
+    heliX: 200,
+    heliY: 150,
+    heliVx: 50,
+    heliVy: 0,
+    heliAngle: 0,
+    heliRotorAngle: 0,
+    missileX: 600,
+    missileY: 500,
+    missileVx: 0,
+    missileVy: 0,
+    missileAngle: 0,
+    launcherX: 600,
+    launcherY: 500,
+    launcherAngle: Math.PI * 0.75,
+    launched: false,
+    dodging: false,
+    dodgeTime: null,
+    lockingOn: false,
+    lockTime: 0,
+    missed: false,
+    hit: false,
+    trail: [],
+    heliTrail: [],
+    closestDist: Infinity,
+    particles: [],
+    shockwaves: [],
+    warningFlashes: 0,
+    cameraShake: 0
+  });
+
+  const reset = () => {
+    setState({
+      time: 0,
+      heliX: 200,
+      heliY: 150,
+      heliVx: 50,
+      heliVy: 0,
+      heliAngle: 0,
+      heliRotorAngle: 0,
+      missileX: 600,
+      missileY: 500,
+      missileVx: 0,
+      missileVy: 0,
+      missileAngle: 0,
+      launcherX: 600,
+      launcherY: 500,
+      launcherAngle: Math.PI * 0.75,
+      launched: false,
+      dodging: false,
+      dodgeTime: null,
+      lockingOn: false,
+      lockTime: 0,
+      missed: false,
+      hit: false,
+      trail: [],
+      heliTrail: [],
+      closestDist: Infinity,
+      particles: [],
+      shockwaves: [],
+      warningFlashes: 0,
+      cameraShake: 0
+    });
+    setIsRunning(false);
+  };
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    
+    const draw = () => {
+      const shakeX = (Math.random() - 0.5) * state.cameraShake;
+      const shakeY = (Math.random() - 0.5) * state.cameraShake;
+      
+      ctx.save();
+      ctx.translate(shakeX, shakeY);
+      
+      const skyGradient = ctx.createLinearGradient(0, 0, 0, 600);
+      skyGradient.addColorStop(0, '#1a2332');
+      skyGradient.addColorStop(0.5, '#2a3f5f');
+      skyGradient.addColorStop(1, '#3a5f7f');
+      ctx.fillStyle = skyGradient;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+      for (let i = 0; i < 50; i++) {
+        const x = (i * 137.5) % canvas.width;
+        const y = (i * 271.3) % 400;
+        const size = (i % 3) * 0.5 + 0.5;
+        ctx.beginPath();
+        ctx.arc(x, y, size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      
+      ctx.strokeStyle = 'rgba(100, 150, 200, 0.1)';
+      ctx.lineWidth = 1;
+      for (let i = 0; i < canvas.width; i += 40) {
+        ctx.beginPath();
+        ctx.moveTo(i, 0);
+        ctx.lineTo(i, canvas.height);
+        ctx.stroke();
+      }
+      for (let i = 0; i < canvas.height; i += 40) {
+        ctx.beginPath();
+        ctx.moveTo(0, i);
+        ctx.lineTo(canvas.width, i);
+        ctx.stroke();
+      }
+      
+      ctx.fillStyle = '#1a3a4a';
+      ctx.beginPath();
+      ctx.moveTo(0, 450);
+      for (let i = 0; i < 10; i++) {
+        ctx.lineTo(i * 100, 450 - Math.sin(i * 0.7) * 80 - 100);
+      }
+      ctx.lineTo(canvas.width, 450);
+      ctx.closePath();
+      ctx.fill();
+      
+      const groundGradient = ctx.createLinearGradient(0, 460, 0, 600);
+      groundGradient.addColorStop(0, '#2a4a2a');
+      groundGradient.addColorStop(1, '#1a3a1a');
+      ctx.fillStyle = groundGradient;
+      ctx.fillRect(0, 460, canvas.width, 140);
+      
+      ctx.strokeStyle = 'rgba(100, 150, 100, 0.3)';
+      for (let i = 0; i < 20; i++) {
+        ctx.beginPath();
+        ctx.moveTo(i * 50, 480);
+        ctx.lineTo(i * 50 + 20, 490);
+        ctx.stroke();
+      }
+      
+      state.shockwaves.forEach(wave => {
+        ctx.strokeStyle = `rgba(255, 200, 100, ${wave.alpha})`;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(wave.x, wave.y, wave.radius, 0, Math.PI * 2);
+        ctx.stroke();
+      });
+      
+      state.particles.forEach(p => {
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = p.alpha;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      });
+      
+      ctx.save();
+      ctx.translate(state.launcherX, state.launcherY);
+      
+      ctx.fillStyle = '#4a4a3a';
+      ctx.fillRect(-8, -25, 16, 25);
+      
+      ctx.fillStyle = '#d4a574';
+      ctx.beginPath();
+      ctx.arc(0, -30, 8, 0, Math.PI * 2);
+      ctx.fill();
+      
+      ctx.fillStyle = '#3a5a3a';
+      ctx.beginPath();
+      ctx.arc(0, -32, 9, Math.PI, Math.PI * 2);
+      ctx.fill();
+      
+      ctx.rotate(state.launcherAngle);
+      ctx.fillStyle = '#555';
+      ctx.fillRect(-6, -45, 12, 50);
+      ctx.fillStyle = '#777';
+      ctx.fillRect(-8, -48, 16, 8);
+      
+      if (state.lockingOn) {
+        ctx.strokeStyle = `rgba(255, 0, 0, ${Math.sin(state.time * 10) * 0.3 + 0.5})`;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5, 5]);
+        ctx.beginPath();
+        ctx.moveTo(0, -48);
+        const targetAngle = Math.atan2(state.heliY - state.launcherY, state.heliX - state.launcherX);
+        const laserLength = 800;
+        ctx.lineTo(Math.cos(targetAngle) * laserLength, Math.sin(targetAngle) * laserLength);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      
+      ctx.restore();
+      
+      ctx.strokeStyle = 'rgba(74, 144, 226, 0.2)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      state.heliTrail.forEach((point, i) => {
+        if (i === 0) ctx.moveTo(point.x, point.y);
+        else ctx.lineTo(point.x, point.y);
+      });
+      ctx.stroke();
+      
+      ctx.shadowBlur = 20;
+      ctx.shadowColor = 'rgba(255, 100, 0, 0.8)';
+      ctx.strokeStyle = 'rgba(255, 120, 0, 0.6)';
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      state.trail.forEach((point, i) => {
+        if (i === 0) ctx.moveTo(point.x, point.y);
+        else ctx.lineTo(point.x, point.y);
+      });
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      
+      if (state.launched && !state.hit && !state.missed) {
+        ctx.save();
+        ctx.translate(state.missileX, state.missileY);
+        ctx.rotate(state.missileAngle);
+        
+        ctx.shadowBlur = 30;
+        ctx.shadowColor = 'rgba(255, 80, 0, 0.8)';
+        
+        ctx.fillStyle = '#ff4444';
+        ctx.fillRect(-6, -20, 12, 40);
+        
+        ctx.fillStyle = '#cc0000';
+        ctx.beginPath();
+        ctx.moveTo(0, -20);
+        ctx.lineTo(-6, -30);
+        ctx.lineTo(6, -30);
+        ctx.closePath();
+        ctx.fill();
+        
+        ctx.fillStyle = '#888';
+        ctx.fillRect(-10, 15, 4, 10);
+        ctx.fillRect(6, 15, 4, 10);
+        ctx.fillRect(-2, 15, 4, 10);
+        
+        ctx.fillStyle = '#222';
+        ctx.beginPath();
+        ctx.arc(0, -25, 4, 0, Math.PI * 2);
+        ctx.fill();
+        
+        ctx.shadowBlur = 0;
+        ctx.restore();
+        
+        const exhaustLength = 40 + Math.sin(state.time * 30) * 10;
+        ctx.save();
+        ctx.translate(state.missileX, state.missileY);
+        ctx.rotate(state.missileAngle);
+        
+        const exhaustGrad = ctx.createLinearGradient(0, 20, 0, 20 + exhaustLength);
+        exhaustGrad.addColorStop(0, 'rgba(255, 200, 100, 0.9)');
+        exhaustGrad.addColorStop(0.3, 'rgba(255, 120, 50, 0.7)');
+        exhaustGrad.addColorStop(1, 'rgba(200, 50, 0, 0)');
+        ctx.fillStyle = exhaustGrad;
+        ctx.beginPath();
+        ctx.ellipse(0, 20 + exhaustLength / 2, 8, exhaustLength / 2, 0, 0, Math.PI * 2);
+        ctx.fill();
+        
+        ctx.restore();
+      }
+      
+      ctx.save();
+      ctx.translate(state.heliX, state.heliY);
+      ctx.rotate(state.heliAngle);
+      
+      if (state.lockingOn && !state.launched) {
+        const pulseSize = 60 + Math.sin(state.time * 15) * 10;
+        ctx.strokeStyle = `rgba(255, 0, 0, ${0.5 - (state.lockTime / 3) * 0.3})`;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(0, 0, pulseSize, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = '#000';
+      ctx.beginPath();
+      ctx.ellipse(5, 50, 35, 12, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      
+      const rotorSpeed = state.dodging ? 25 : 20;
+      const newRotorAngle = state.heliRotorAngle + rotorSpeed * dt;
+      
+      for (let i = 0; i < 4; i++) {
+        const angle = newRotorAngle + (i * Math.PI / 2);
+        ctx.save();
+        ctx.rotate(angle);
+        ctx.fillStyle = `rgba(80, 80, 80, ${0.3 + Math.abs(Math.sin(angle)) * 0.4})`;
+        ctx.fillRect(-50, -3, 100, 6);
+        ctx.restore();
+      }
+      
+      ctx.fillStyle = '#666';
+      ctx.beginPath();
+      ctx.arc(0, -2, 8, 0, Math.PI * 2);
+      ctx.fill();
+      
+      const canopyGrad = ctx.createRadialGradient(-5, -15, 5, 0, -10, 15);
+      canopyGrad.addColorStop(0, 'rgba(100, 150, 200, 0.6)');
+      canopyGrad.addColorStop(1, 'rgba(50, 100, 150, 0.8)');
+      ctx.fillStyle = canopyGrad;
+      ctx.beginPath();
+      ctx.ellipse(0, -10, 14, 14, 0, 0, Math.PI * 2);
+      ctx.fill();
+      
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+      ctx.beginPath();
+      ctx.ellipse(-5, -15, 6, 8, 0.3, 0, Math.PI);
+      ctx.fill();
+      
+      const bodyColor = state.dodging ? '#00ff00' : '#4a90e2';
+      const bodyGrad = ctx.createLinearGradient(-20, -5, 20, 15);
+      bodyGrad.addColorStop(0, bodyColor);
+      bodyGrad.addColorStop(1, state.dodging ? '#00cc00' : '#357abd');
+      ctx.fillStyle = bodyGrad;
+      ctx.fillRect(-25, -8, 50, 28);
+      
+      ctx.strokeStyle = '#2a5a8a';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-25, -8, 50, 28);
+      
+      ctx.fillStyle = 'rgba(20, 40, 60, 0.8)';
+      ctx.fillRect(10, -5, 12, 8);
+      ctx.fillRect(10, 7, 12, 8);
+      
+      ctx.fillStyle = bodyColor;
+      ctx.fillRect(20, 3, 35, 10);
+      
+      const tailRotorAngle = state.time * 40;
+      ctx.save();
+      ctx.translate(54, 8);
+      ctx.rotate(tailRotorAngle);
+      ctx.fillStyle = 'rgba(100, 100, 100, 0.5)';
+      ctx.fillRect(-2, -15, 4, 30);
+      ctx.restore();
+      
+      ctx.fillStyle = '#357abd';
+      ctx.beginPath();
+      ctx.moveTo(48, 0);
+      ctx.lineTo(58, -12);
+      ctx.lineTo(58, 0);
+      ctx.closePath();
+      ctx.fill();
+      
+      ctx.strokeStyle = '#555';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(-20, 20);
+      ctx.lineTo(-20, 28);
+      ctx.lineTo(15, 28);
+      ctx.lineTo(15, 20);
+      ctx.stroke();
+      
+      ctx.beginPath();
+      ctx.moveTo(-20, 32);
+      ctx.lineTo(-20, 40);
+      ctx.lineTo(15, 40);
+      ctx.lineTo(15, 32);
+      ctx.stroke();
+      
+      if (state.heliVx !== 0 || state.heliVy !== 0) {
+        ctx.fillStyle = 'rgba(200, 200, 255, 0.3)';
+        ctx.beginPath();
+        ctx.ellipse(30, 8, 5, 3, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      
+      ctx.restore();
+      
+      if (state.launched && !state.hit && !state.missed) {
+        const dist = Math.sqrt(
+          Math.pow(state.heliX - state.missileX, 2) + 
+          Math.pow(state.heliY - state.missileY, 2)
+        ) / scale;
+        
+        ctx.strokeStyle = 'rgba(255, 255, 0, 0.6)';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([8, 8]);
+        ctx.beginPath();
+        ctx.moveTo(state.heliX, state.heliY);
+        ctx.lineTo(state.missileX, state.missileY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        
+        const midX = (state.heliX + state.missileX) / 2;
+        const midY = (state.heliY + state.missileY) / 2;
+        
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+        ctx.fillRect(midX - 35, midY - 12, 70, 24);
+        ctx.fillStyle = '#ffff00';
+        ctx.font = 'bold 14px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${dist.toFixed(0)}m`, midX, midY + 5);
+        ctx.textAlign = 'left';
+      }
+      
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+      ctx.fillRect(5, 5, 280, state.dodging ? 200 : 120);
+      
+      ctx.fillStyle = '#00ff00';
+      ctx.font = 'bold 16px monospace';
+      ctx.fillText(`TIME: ${state.time.toFixed(2)}s`, 15, 30);
+      const heliSpeedKmh = Math.sqrt(state.heliVx**2 + state.heliVy**2) / scale * 3.6;
+      ctx.fillText(`SPEED: ${heliSpeedKmh.toFixed(0)} km/h`, 15, 55);
+      
+      if (state.lockingOn && !state.launched) {
+        const lockPercent = Math.min(100, (state.lockTime / 3) * 100);
+        ctx.fillStyle = '#ff0000';
+        ctx.fillText(`WARNING: ${lockPercent.toFixed(0)}%`, 15, 80);
+        
+        ctx.fillStyle = 'rgba(255, 0, 0, 0.3)';
+        ctx.fillRect(15, 90, 250, 15);
+        ctx.fillStyle = '#ff0000';
+        ctx.fillRect(15, 90, 250 * (lockPercent / 100), 15);
+      }
+      
+      if (state.launched) {
+        const dist = Math.sqrt(
+          Math.pow(state.heliX - state.missileX, 2) + 
+          Math.pow(state.heliY - state.missileY, 2)
+        ) / scale;
+        
+        ctx.fillStyle = '#ffaa00';
+        ctx.fillText(`RANGE: ${dist.toFixed(0)}m`, 15, 80);
+        
+        const distToEngineer = Math.sqrt(
+          Math.pow(state.heliX - state.launcherX, 2) + 
+          Math.pow(state.heliY - state.launcherY, 2)
+        ) / scale;
+        
+        if (dist <= distToEngineer / 2 && !state.dodging) {
+          ctx.fillStyle = '#ff0000';
+          ctx.fillText(`DODGE NOW!`, 15, 105);
+        }
+        
+        if (state.dodging) {
+          const t = Math.max(0.01, dist / V_m);
+          const s = V_t * t;
+          const a = 2 * V_t / t;
+          const g = a / 9.81;
+          
+          ctx.fillStyle = '#00ff00';
+          ctx.fillText(`EVADING`, 15, 105);
+          ctx.font = '12px monospace';
+          ctx.fillStyle = '#fff';
+          ctx.fillText(`Time: ${t.toFixed(2)}s`, 15, 130);
+          ctx.fillText(`Offset: ${s.toFixed(1)}m`, 15, 148);
+          ctx.fillText(`Need: ${g.toFixed(1)}g`, 15, 166);
+          ctx.fillStyle = g > (a_max / 9.81) ? '#00ff00' : '#ff0000';
+          ctx.fillText(`Max: ${(a_max/9.81).toFixed(1)}g`, 15, 184);
+        }
+      }
+      
+      if (state.missed) {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+        ctx.fillRect(canvas.width / 2 - 200, canvas.height / 2 - 60, 400, 120);
+        
+        ctx.fillStyle = '#00ff00';
+        ctx.font = 'bold 42px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('EVADED!', canvas.width / 2, canvas.height / 2);
+        
+        ctx.font = '20px monospace';
+        ctx.fillStyle = '#ffff00';
+        ctx.fillText(`Closest: ${state.closestDist.toFixed(1)}m`, canvas.width / 2, canvas.height / 2 + 35);
+        ctx.textAlign = 'left';
+      }
+      
+      if (state.hit) {
+        ctx.fillStyle = 'rgba(255, 100, 0, 0.5)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+        ctx.fillRect(canvas.width / 2 - 150, canvas.height / 2 - 50, 300, 100);
+        
+        ctx.fillStyle = '#ff0000';
+        ctx.font = 'bold 48px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('IMPACT!', canvas.width / 2, canvas.height / 2 + 15);
+        ctx.textAlign = 'left';
+      }
+      
+      ctx.restore();
+    };
+    
+    draw();
+  }, [state]);
+
+  useEffect(() => {
+    if (!isRunning) return;
+    
+    const simulate = () => {
+      setState(prev => {
+        if (prev.hit || prev.missed) return prev;
+        
+        const newState = { ...prev };
+        newState.time += dt * timeScale;
+        
+        if (!prev.lockingOn && newState.time >= 0.5) {
+          newState.lockingOn = true;
+        }
+        
+        if (newState.lockingOn && !newState.launched) {
+          newState.lockTime += dt * timeScale;
+          
+          const dx = newState.heliX - newState.launcherX;
+          const dy = newState.heliY - newState.launcherY;
+          newState.launcherAngle = Math.atan2(dy, dx);
+          
+          if (newState.lockTime >= 3) {
+            newState.launched = true;
+            newState.lockingOn = false;
+            
+            const angle = Math.atan2(dy, dx);
+            newState.missileVx = Math.cos(angle) * V_m * scale;
+            newState.missileVy = Math.sin(angle) * V_m * scale;
+            newState.missileAngle = angle + Math.PI / 2;
+            
+            newState.shockwaves.push({
+              x: newState.missileX,
+              y: newState.missileY,
+              radius: 0,
+              alpha: 1
+            });
+            
+            newState.cameraShake = 15;
+          }
+        }
+        
+        if (newState.cameraShake > 0) {
+          newState.cameraShake *= 0.9;
+          if (newState.cameraShake < 0.1) newState.cameraShake = 0;
+        }
+        
+        if (!newState.dodging) {
+          newState.heliX += newState.heliVx * dt * scale * timeScale;
+          newState.heliY += newState.heliVy * dt * scale * timeScale;
+        } else {
+          newState.heliX += newState.heliVx * dt * scale * timeScale;
+          newState.heliY += newState.heliVy * dt * scale * timeScale;
+          newState.heliAngle = Math.atan2(newState.heliVy, newState.heliVx) * 0.3;
+        }
+        
+        newState.heliTrail.push({ x: newState.heliX, y: newState.heliY });
+        if (newState.heliTrail.length > 60) newState.heliTrail.shift();
+        
+        if (newState.heliX > 900) newState.heliX = 900;
+        if (newState.heliX < 100) newState.heliX = 100;
+        if (newState.heliY < 80) newState.heliY = 80;
+        if (newState.heliY > 400) newState.heliY = 400;
+        
+        newState.heliRotorAngle += (newState.dodging ? 25 : 20) * dt * timeScale;
+        
+        if (newState.launched) {
+          const dx = newState.heliX - newState.missileX;
+          const dy = newState.heliY - newState.missileY;
+          const dist = Math.sqrt(dx * dx + dy * dy) / scale;
+          
+          newState.closestDist = Math.min(prev.closestDist, dist);
+          
+        // Calculate distance between helicopter and engineer (launcher)
+        const distToEngineer = Math.sqrt(
+          Math.pow(newState.heliX - newState.launcherX, 2) + 
+          Math.pow(newState.heliY - newState.launcherY, 2)
+        ) / scale;
+        
+        // Dodge when missile reaches D/2 (half the initial distance to engineer)
+        if (!newState.dodging && dist <= distToEngineer / 2 + 30 && dist > 50) {
+          newState.dodging = true;
+          newState.dodgeTime = newState.time;
+          
+          const perpAngle = Math.atan2(dy, dx) + Math.PI / 2;
+          newState.heliVx = Math.cos(perpAngle) * V_t;
+          newState.heliVy = Math.sin(perpAngle) * V_t;
+            
+            newState.shockwaves.push({
+              x: newState.heliX,
+              y: newState.heliY,
+              radius: 0,
+              alpha: 1
+            });
+            
+            newState.cameraShake = 8;
+          }
+          
+          // Advanced Proportional Navigation (PN) Guidance Law
+          // PN makes the missile follow the target's curvature by tracking line-of-sight rate
+          const targetDx = (newState.heliX - newState.missileX) / scale;
+          const targetDy = (newState.heliY - newState.missileY) / scale;
+          const targetDist = Math.sqrt(targetDx * targetDx + targetDy * targetDy);
+          
+          if (targetDist > 5) {
+            // Line-of-sight vector
+            const losX = targetDx / targetDist;
+            const losY = targetDy / targetDist;
+            
+            // Calculate relative velocity (target velocity - missile velocity)
+            const relVx = (newState.heliVx - newState.missileVx) / scale;
+            const relVy = (newState.heliVy - newState.missileVy) / scale;
+            
+            // Line-of-sight rate (angular velocity) = (r × v_rel) / r²
+            // For 2D: LOS_rate = (losX * relVy - losY * relVx) / r
+            const losRate = (losX * relVy - losY * relVx) / targetDist;
+            
+            // Proportional Navigation: acceleration = N * V_c * LOS_rate
+            // Where N is navigation constant and V_c is closing velocity
+            const closingVelocity = -(losX * relVx + losY * relVy); // Negative relative velocity along LOS
+            
+            // Calculate required acceleration perpendicular to LOS (following curvature)
+            const accelMagnitude = N * Math.abs(closingVelocity) * Math.abs(losRate);
+            const accelToApply = Math.min(a_max, accelMagnitude);
+            
+            // Acceleration direction: perpendicular to LOS (rotate 90°)
+            const accelX = -losY * accelToApply * (losRate >= 0 ? 1 : -1);
+            const accelY = losX * accelToApply * (losRate >= 0 ? 1 : -1);
+            
+            // Apply acceleration to missile velocity
+            newState.missileVx += accelX * dt * timeScale * scale;
+            newState.missileVy += accelY * dt * timeScale * scale;
+            
+            // Apply drag (aerodynamic resistance)
+            const currentSpeed = Math.sqrt(newState.missileVx * newState.missileVx + newState.missileVy * newState.missileVy);
+            if (currentSpeed > 0) {
+              const dragForce = 0.5 * dragCoefficient * airDensity * referenceArea * currentSpeed * currentSpeed / (scale * scale);
+              const dragAccel = dragForce / missileMass;
+              const dragVx = -(newState.missileVx / currentSpeed) * dragAccel * dt * timeScale * scale;
+              const dragVy = -(newState.missileVy / currentSpeed) * dragAccel * dt * timeScale * scale;
+              newState.missileVx += dragVx;
+              newState.missileVy += dragVy;
+            }
+            
+            // Maintain missile speed (thrust compensates for drag in steady state)
+            const newSpeed = Math.sqrt(newState.missileVx * newState.missileVx + newState.missileVy * newState.missileVy);
+            const speedRatio = newSpeed / (V_m * scale);
+            if (speedRatio > 0.5) { // Only if not too slow
+              newState.missileVx = (newState.missileVx / newSpeed) * V_m * scale * Math.min(1, speedRatio * 1.02);
+              newState.missileVy = (newState.missileVy / newSpeed) * V_m * scale * Math.min(1, speedRatio * 1.02);
+            }
+            
+            newState.missileAngle = Math.atan2(newState.missileVy, newState.missileVx) + Math.PI / 2;
+          }
+          
+          newState.missileX += newState.missileVx * dt * scale * timeScale;
+          newState.missileY += newState.missileVy * dt * scale * timeScale;
+          
+          newState.trail.push({ x: newState.missileX, y: newState.missileY });
+          if (newState.trail.length > 200) newState.trail.shift();
+          
+          for (let i = 0; i < 3; i++) {
+            const exhaustAngle = newState.missileAngle - Math.PI / 2;
+            const spreadAngle = (Math.random() - 0.5) * 0.5;
+            const speed = 50 + Math.random() * 30;
+            
+            newState.particles.push({
+              x: newState.missileX - Math.cos(exhaustAngle) * 15,
+              y: newState.missileY - Math.sin(exhaustAngle) * 15,
+              vx: -Math.cos(exhaustAngle + spreadAngle) * speed,
+              vy: -Math.sin(exhaustAngle + spreadAngle) * speed,
+              size: 2 + Math.random() * 3,
+              alpha: 0.8,
+              color: `rgba(255, ${100 + Math.random() * 100}, ${Math.random() * 50}, 1)`,
+              life: 0
+            });
+          }
+          
+          const collisionDist = Math.sqrt(
+            (newState.heliX - newState.missileX) * (newState.heliX - newState.missileX) + 
+            (newState.heliY - newState.missileY) * (newState.heliY - newState.missileY)
+          );
+          
+          if (collisionDist < 25) {
+            newState.hit = true;
+            
+            for (let i = 0; i < 100; i++) {
+              const angle = Math.random() * Math.PI * 2;
+              const speed = 100 + Math.random() * 200;
+              newState.particles.push({
+                x: newState.missileX,
+                y: newState.missileY,
+                vx: Math.cos(angle) * speed,
+                vy: Math.sin(angle) * speed,
+                size: 3 + Math.random() * 6,
+                alpha: 1,
+                color: `rgba(255, ${100 + Math.random() * 100}, 0, 1)`,
+                life: 0
+              });
+            }
+            
+            newState.cameraShake = 30;
+          }
+          
+          const relativePosY = newState.missileY - newState.heliY;
+          const lateralDist = Math.abs(newState.heliX - newState.missileX);
+          
+          if (relativePosY < -40 && newState.dodging && newState.missileVy < 0) {
+            newState.missed = true;
+          }
+          
+          if (lateralDist > 120 && newState.dodging && newState.time - newState.dodgeTime > 2) {
+            newState.missed = true;
+          }
+          
+          if (newState.missileY < -150 || newState.missileX < -150 || newState.missileX > 1050) {
+            newState.missed = true;
+          }
+        }
+        
+        newState.particles = newState.particles.map(p => ({
+          ...p,
+          x: p.x + p.vx * dt * timeScale * scale,
+          y: p.y + p.vy * dt * timeScale * scale,
+          vy: p.vy + 9.81 * dt * timeScale * 5,
+          alpha: p.alpha - dt * timeScale * 1.5,
+          life: p.life + dt * timeScale
+        })).filter(p => p.alpha > 0 && p.life < 2);
+        
+        newState.shockwaves = newState.shockwaves.map(w => ({
+          ...w,
+          radius: w.radius + 300 * dt * timeScale,
+          alpha: w.alpha - dt * timeScale * 2
+        })).filter(w => w.alpha > 0);
+        
+        return newState;
+      });
+      
+      animationRef.current = requestAnimationFrame(simulate);
+    };
+    
+    animationRef.current = requestAnimationFrame(simulate);
+    
+    return () => {
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
+      }
+    };
+  }, [isRunning]);
+
+  return (
+    <div className="w-full min-h-screen bg-gradient-to-b from-slate-950 to-slate-900 flex flex-col items-center justify-center p-4">
+      <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl shadow-2xl p-8 max-w-5xl w-full border-2 border-slate-700">
+        <div className="flex items-center justify-center gap-3 mb-3">
+          <Zap className="text-yellow-400" size={32} />
+          <h1 className="text-4xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-cyan-400">
+            Advanced Missile Evasion Physics
+          </h1>
+          <Wind className="text-cyan-400" size={32} />
+        </div>
+        
+        <p className="text-slate-300 text-center mb-2 text-lg">
+          Real-time Stinger missile engagement simulation with D/2 evasion maneuver
+        </p>
+        <p className="text-slate-400 text-center mb-6 text-sm">
+          ⚡ Slow motion replay • 🎯 Advanced targeting • 💨 Realistic physics
+        </p>
+        
+        <div className="relative">
+          <canvas
+            ref={canvasRef}
+            width={1000}
+            height={600}
+            className="border-4 border-slate-600 rounded-xl mb-6 mx-auto shadow-2xl bg-gradient-to-b from-slate-900 to-slate-800"
+            style={{ imageRendering: 'crisp-edges' }}
+          />
+          
+          <div className="absolute top-4 right-4 bg-black bg-opacity-60 rounded-lg p-3 backdrop-blur-sm">
+            <div className="text-green-400 text-xs font-mono space-y-1">
+              <div>🎮 SIMULATION ACTIVE</div>
+              <div>⏱️ SLOW MOTION: 0.5x</div>
+              <div>📡 TRACKING: ENABLED</div>
+            </div>
+          </div>
+        </div>
+        
+        <div className="flex gap-4 justify-center mb-6 flex-wrap">
+          <button
+            onClick={() => setIsRunning(!isRunning)}
+            className="flex items-center gap-2 px-8 py-4 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white rounded-xl font-bold transition-all transform hover:scale-105 shadow-lg"
+          >
+            {isRunning ? <Pause size={24} /> : <Play size={24} />}
+            {isRunning ? 'PAUSE' : 'START'}
+          </button>
+          
+          <button
+            onClick={reset}
+            className="flex items-center gap-2 px-8 py-4 bg-gradient-to-r from-slate-600 to-slate-700 hover:from-slate-700 hover:to-slate-800 text-white rounded-xl font-bold transition-all transform hover:scale-105 shadow-lg"
+          >
+            <RotateCcw size={24} />
+            RESET
+          </button>
+          
+          <button
+            onClick={() => setShowInfo(!showInfo)}
+            className={`flex items-center gap-2 px-8 py-4 rounded-xl font-bold transition-all transform hover:scale-105 shadow-lg ${
+              showInfo 
+                ? 'bg-gradient-to-r from-cyan-600 to-cyan-700 hover:from-cyan-700 hover:to-cyan-800' 
+                : 'bg-gradient-to-r from-slate-600 to-slate-700 hover:from-slate-700 hover:to-slate-800'
+            } text-white`}
+          >
+            <Info size={24} />
+            PHYSICS
+          </button>
+        </div>
+        
+        {showInfo && (
+          <div className="bg-gradient-to-br from-slate-700 to-slate-800 rounded-xl p-6 text-white space-y-4 border-2 border-cyan-500/30 shadow-xl">
+            <div className="flex items-center gap-2 mb-4">
+              <div className="w-1 h-8 bg-cyan-400 rounded"></div>
+              <h3 className="font-bold text-2xl text-cyan-400">Mission Parameters</h3>
+            </div>
+            
+            <div className="grid grid-cols-2 gap-4 bg-slate-900/50 rounded-lg p-4">
+              <div className="space-y-2">
+                <div className="flex justify-between border-b border-slate-600 pb-2">
+                  <span className="text-slate-400">Initial Distance (D):</span>
+                  <span className="font-bold text-cyan-400">{D}m</span>
+                </div>
+                <div className="flex justify-between border-b border-slate-600 pb-2">
+                  <span className="text-slate-400">Missile Speed (V_m):</span>
+                  <span className="font-bold text-orange-400">{V_m_display} km/h</span>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <div className="flex justify-between border-b border-slate-600 pb-2">
+                  <span className="text-slate-400">Heli Speed (V_t):</span>
+                  <span className="font-bold text-green-400">{V_t_display} km/h</span>
+                </div>
+                <div className="flex justify-between border-b border-slate-600 pb-2">
+                  <span className="text-slate-400">Max Accel (a_max):</span>
+                  <span className="font-bold text-red-400">{a_max}m/s² ({(a_max/9.81).toFixed(1)}g)</span>
+                </div>
+              </div>
+            </div>
+            
+            <div className="bg-slate-900/50 rounded-lg p-4">
+              <p className="font-semibold mb-3 text-lg text-yellow-400">📐 Critical Equations:</p>
+              <div className="bg-black/50 p-4 rounded font-mono text-sm space-y-2 border border-slate-700">
+                <div className="text-cyan-300">t = D/(2V_m) = <span className="text-yellow-300">{(D/(2*V_m)).toFixed(3)}s</span></div>
+                <div className="text-cyan-300">s = V_t × t = <span className="text-yellow-300">{(V_t * D/(2*V_m)).toFixed(2)}m</span></div>
+                <div className="text-cyan-300">a_required = 2s/t² = 4V_m·V_t/D = <span className="text-yellow-300">{(4*V_m*V_t/D).toFixed(2)}m/s²</span></div>
+                <div className="text-cyan-300">g_required = <span className="text-orange-400 font-bold">{(4*V_m*V_t/D/9.81).toFixed(2)}g</span> &gt; a_max = <span className="text-red-400 font-bold">{(a_max/9.81).toFixed(1)}g</span> <span className="text-green-400">✓ MISS</span></div>
+                <div className="text-cyan-300">R_turn = V_m²/a = <span className="text-yellow-300">{(V_m*V_m/a_max).toFixed(0)}m</span></div>
+                <div className="text-cyan-300">PN Constant (N) = <span className="text-yellow-300">{N}</span></div>
+              </div>
+            </div>
+            
+            <div className="bg-gradient-to-r from-blue-900/30 to-purple-900/30 rounded-lg p-4 border border-blue-500/30">
+              <p className="text-sm leading-relaxed">
+                <span className="font-bold text-cyan-400">🎯 Tactical Analysis:</span> The helicopter waits until the missile reaches D/2 (<span className="text-yellow-400 font-bold">{D/2}m</span> from engineer), 
+                then executes a hard perpendicular turn at <span className="text-green-400 font-bold">{V_t_display} km/h</span>. 
+                The missile uses <span className="text-purple-400 font-bold">Proportional Navigation (PN)</span> guidance to follow the helicopter's curvature, 
+                requiring <span className="text-orange-400 font-bold">{(4*V_m*V_t/D/9.81).toFixed(1)}g</span> lateral acceleration to intercept 
+                but can only achieve <span className="text-red-400 font-bold">{(a_max/9.81).toFixed(1)}g</span> maximum. 
+                With a turn radius of <span className="text-purple-400 font-bold">{(V_m*V_m/a_max).toFixed(0)}m</span>, 
+                the missile <span className="text-green-400 font-bold">physically cannot curve tightly enough</span> and overshoots the target!
+              </p>
+            </div>
+            
+            <div className="grid grid-cols-3 gap-3">
+              <div className="bg-blue-900/30 rounded-lg p-3 border border-blue-500/30 text-center">
+                <div className="text-2xl mb-1">🚁</div>
+                <div className="text-xs text-slate-300">Helicopter</div>
+                <div className="text-lg font-bold text-blue-400">Target</div>
+              </div>
+              <div className="bg-red-900/30 rounded-lg p-3 border border-red-500/30 text-center">
+                <div className="text-2xl mb-1">🚀</div>
+                <div className="text-xs text-slate-300">Stinger</div>
+                <div className="text-lg font-bold text-red-400">Threat</div>
+              </div>
+              <div className="bg-green-900/30 rounded-lg p-3 border border-green-500/30 text-center">
+                <div className="text-2xl mb-1">✓</div>
+                <div className="text-xs text-slate-300">Result</div>
+                <div className="text-lg font-bold text-green-400">Evaded</div>
+              </div>
+            </div>
+          </div>
+        )}
+        
+        <div className="mt-6 text-center text-slate-400 text-sm space-y-2">
+          <p>💡 Watch the helicopter move forward, get locked-on, then execute the perfect D/2 dodge maneuver</p>
+          <p className="text-xs">⚠️ Red targeting laser indicates lock-on phase • Green helicopter = evasive action initiated</p>
+        </div>
+        
+        {/* Advanced Physics Explanation */}
+        <div className="mt-8 bg-gradient-to-br from-slate-800 to-slate-900 rounded-xl p-8 border-2 border-slate-700 shadow-2xl">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="w-1 h-10 bg-cyan-400 rounded"></div>
+            <h2 className="text-3xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-400">
+              Advanced Physics Explanation
+            </h2>
+          </div>
+          
+          <div className="space-y-6 text-slate-300">
+            {/* Scenario Setup */}
+            <div className="bg-slate-900/50 rounded-lg p-6 border border-slate-700">
+              <h3 className="text-xl font-bold text-cyan-400 mb-4">📋 Scenario Setup</h3>
+              <p className="leading-relaxed mb-3">
+                A helicopter is flying at <span className="font-bold text-green-400">{V_t_display} km/h</span> ({V_t.toFixed(0)} m/s) 
+                at an initial distance <span className="font-bold text-yellow-400">D = {D}m</span> from an engineer on the ground 
+                equipped with a Stinger missile launcher. The engineer locks onto the helicopter for 3 seconds, then launches 
+                the missile at <span className="font-bold text-orange-400">{V_m_display} km/h</span> ({V_m.toFixed(0)} m/s).
+              </p>
+              <p className="leading-relaxed">
+                The helicopter executes an evasive maneuver when the missile reaches <span className="font-bold text-yellow-400">D/2 = {D/2}m</span>, 
+                which is half the distance between the helicopter and the engineer at the moment of engagement. This timing is critical 
+                for maximizing the evasion probability.
+              </p>
+            </div>
+            
+            {/* Proportional Navigation */}
+            <div className="bg-slate-900/50 rounded-lg p-6 border border-slate-700">
+              <h3 className="text-xl font-bold text-cyan-400 mb-4">🎯 Proportional Navigation (PN) Guidance Law</h3>
+              <p className="leading-relaxed mb-4">
+                The Stinger missile uses <span className="font-bold text-purple-400">Proportional Navigation</span>, a sophisticated 
+                guidance algorithm that allows it to follow curved target trajectories. Unlike simple pursuit (which always points 
+                directly at the target), PN predicts where the target will be by tracking the rate of change of the line-of-sight angle.
+              </p>
+              
+              <div className="bg-black/50 p-4 rounded font-mono text-sm space-y-2 border border-slate-700 mb-4">
+                <div className="text-cyan-300">
+                  <strong className="text-yellow-400">Line-of-Sight (LOS) Vector:</strong> r⃗ = r̂ × |r|
+                </div>
+                <div className="text-cyan-300">
+                  <strong className="text-yellow-400">Relative Velocity:</strong> v⃗_rel = v⃗_target - v⃗_missile
+                </div>
+                <div className="text-cyan-300">
+                  <strong className="text-yellow-400">LOS Rate (Angular Velocity):</strong> λ̇ = (r̂ × v⃗_rel) / |r|
+                </div>
+                <div className="text-cyan-300">
+                  <strong className="text-yellow-400">Closing Velocity:</strong> V_c = -r̂ · v⃗_rel
+                </div>
+                <div className="text-cyan-300">
+                  <strong className="text-yellow-400">PN Acceleration:</strong> a⃗_PN = N × V_c × λ̇ (perpendicular to LOS)
+                </div>
+              </div>
+              
+              <p className="leading-relaxed">
+                Where <span className="font-bold text-purple-400">N = {N}</span> is the navigation constant. Higher N values make 
+                the missile more aggressive in turning, but also more sensitive to noise. The acceleration is always perpendicular 
+                to the line-of-sight, causing the missile to curve smoothly toward the target's future position.
+              </p>
+              <p className="leading-relaxed mt-3">
+                This guidance law allows the missile to <span className="font-bold text-orange-400">follow the helicopter's curvature</span> 
+                as it maneuvers, making it much more effective than simple pursuit against maneuvering targets.
+              </p>
+            </div>
+            
+            {/* Aerodynamics */}
+            <div className="bg-slate-900/50 rounded-lg p-6 border border-slate-700">
+              <h3 className="text-xl font-bold text-cyan-400 mb-4">💨 Aerodynamic Forces</h3>
+              <p className="leading-relaxed mb-4">
+                The simulation includes realistic aerodynamic drag acting on the missile:
+              </p>
+              
+              <div className="bg-black/50 p-4 rounded font-mono text-sm space-y-2 border border-slate-700 mb-4">
+                <div className="text-cyan-300">
+                  <strong className="text-yellow-400">Drag Force:</strong> F_drag = ½ × C_d × ρ × A × v²
+                </div>
+                <div className="text-cyan-300">
+                  <strong className="text-yellow-400">Drag Acceleration:</strong> a_drag = F_drag / m
+                </div>
+              </div>
+              
+              <p className="leading-relaxed">
+                Where <span className="font-bold">C_d = {dragCoefficient}</span> is the drag coefficient, 
+                <span className="font-bold"> ρ = {airDensity} kg/m³</span> is air density (sea level), 
+                <span className="font-bold"> A = {referenceArea} m²</span> is the reference area, 
+                and <span className="font-bold"> m = {missileMass} kg</span> is the missile mass (FIM-92 Stinger specification).
+              </p>
+              <p className="leading-relaxed mt-3">
+                The missile's thrust system compensates for drag to maintain its design speed of {V_m_display} km/h, 
+                but drag still affects the missile's ability to rapidly change direction.
+              </p>
+            </div>
+            
+            {/* Evasion Physics */}
+            <div className="bg-slate-900/50 rounded-lg p-6 border border-slate-700">
+              <h3 className="text-xl font-bold text-cyan-400 mb-4">🚁 Evasion Maneuver Physics</h3>
+              <p className="leading-relaxed mb-4">
+                When the missile reaches D/2, the helicopter executes a hard turn perpendicular to the missile's approach direction:
+              </p>
+              
+              <div className="bg-black/50 p-4 rounded font-mono text-sm space-y-2 border border-slate-700 mb-4">
+                <div className="text-cyan-300">
+                  <strong className="text-yellow-400">Time to Intercept (at D/2):</strong> t = (D/2) / V_m = {(D/2/V_m).toFixed(3)}s
+                </div>
+                <div className="text-cyan-300">
+                  <strong className="text-yellow-400">Lateral Offset:</strong> s = V_t × t = {(V_t * D/2/V_m).toFixed(2)}m
+                </div>
+                <div className="text-cyan-300">
+                  <strong className="text-yellow-400">Required Lateral Acceleration:</strong> a_req = 2s/t² = {(4*V_m*V_t/D).toFixed(2)} m/s² ({(4*V_m*V_t/D/9.81).toFixed(2)}g)
+                </div>
+                <div className="text-cyan-300">
+                  <strong className="text-yellow-400">Missile Maximum Acceleration:</strong> a_max = {a_max} m/s² ({(a_max/9.81).toFixed(1)}g)
+                </div>
+              </div>
+              
+              <p className="leading-relaxed">
+                Since <span className="font-bold text-red-400">a_req = {(4*V_m*V_t/D/9.81).toFixed(2)}g</span> exceeds 
+                <span className="font-bold text-orange-400"> a_max = {(a_max/9.81).toFixed(1)}g</span>, the missile 
+                <span className="font-bold text-green-400"> physically cannot</span> generate enough lateral acceleration to intercept 
+                the helicopter. The missile attempts to follow the helicopter's curve but overshoots due to its minimum turn radius limitation.
+              </p>
+            </div>
+            
+            {/* Turn Radius */}
+            <div className="bg-slate-900/50 rounded-lg p-6 border border-slate-700">
+              <h3 className="text-xl font-bold text-cyan-400 mb-4">🔄 Minimum Turn Radius</h3>
+              <p className="leading-relaxed mb-4">
+                The missile's ability to turn is limited by its maximum lateral acceleration:
+              </p>
+              
+              <div className="bg-black/50 p-4 rounded font-mono text-sm space-y-2 border border-slate-700 mb-4">
+                <div className="text-cyan-300">
+                  <strong className="text-yellow-400">Turn Radius:</strong> R = V² / a = {(V_m*V_m/a_max).toFixed(0)}m
+                </div>
+                <div className="text-cyan-300">
+                  <strong className="text-yellow-400">Angular Velocity:</strong> ω = V / R = {(V_m/(V_m*V_m/a_max)).toFixed(3)} rad/s
+                </div>
+              </div>
+              
+              <p className="leading-relaxed">
+                With a minimum turn radius of <span className="font-bold text-purple-400">{(V_m*V_m/a_max).toFixed(0)}m</span>, 
+                the missile cannot execute the tight turn required to intercept the helicopter after the evasive maneuver. 
+                The helicopter's lateral offset of <span className="font-bold text-green-400">{(V_t * D/2/V_m).toFixed(2)}m</span> 
+                is sufficient to escape the missile's engagement envelope.
+              </p>
+            </div>
+            
+            {/* Energy Considerations */}
+            <div className="bg-slate-900/50 rounded-lg p-6 border border-slate-700">
+              <h3 className="text-xl font-bold text-cyan-400 mb-4">⚡ Energy and Kinematics</h3>
+              <p className="leading-relaxed mb-4">
+                The evasion strategy exploits the missile's energy limitations:
+              </p>
+              
+              <div className="bg-black/50 p-4 rounded font-mono text-sm space-y-2 border border-slate-700 mb-4">
+                <div className="text-cyan-300">
+                  <strong className="text-yellow-400">Missile Kinetic Energy:</strong> E_k = ½mv² = {(0.5 * missileMass * V_m * V_m / 1000).toFixed(1)} kJ
+                </div>
+                <div className="text-cyan-300">
+                  <strong className="text-yellow-400">Power for Acceleration:</strong> P = m×a×v = {(missileMass * a_max * V_m / 1000).toFixed(1)} kW
+                </div>
+              </div>
+              
+              <p className="leading-relaxed">
+                The missile's guidance system must continuously apply lateral acceleration to follow the target. The sudden 
+                perpendicular maneuver at D/2 maximizes the required acceleration beyond the missile's physical capabilities, 
+                causing it to miss. This demonstrates the fundamental trade-off between missile speed, maneuverability, and 
+                target evasion tactics in air defense scenarios.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default MissileDodgeVisualization;
